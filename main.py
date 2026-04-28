@@ -5,20 +5,19 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from aiogram import Bot, Dispatcher, types
 from aiogram.types import KeyboardButton, ReplyKeyboardMarkup, WebAppInfo
-from aiogram.contrib.middlewares.logging import LoggingMiddleware
-from aiogram.utils.executor import set_webhook, start_webhook
+from aiogram.filters import Command
+from aiogram.client.session import aiohttp  # не используется напрямую, но для webhook
 import uvicorn
 
-# ========== КОНФИГУРАЦИЯ ==========
+# ---------- КОНФИГ ----------
 BOT_TOKEN = os.getenv("BOT_TOKEN", "7739590241:AAHp83Td4uluzJw1upAYi-0zqnxPuPSHNdg")
-# При деплое на Render переменная RENDER_EXTERNAL_URL автоматически подставится
 BASE_URL = os.getenv("RENDER_EXTERNAL_URL", os.getenv("BASE_URL", "https://your-app.onrender.com"))
-# Убираем слеш в конце, если есть
 BASE_URL = BASE_URL.rstrip('/')
 
-# ========== БАЗА ДАННЫХ ==========
+# ---------- БАЗА ДАННЫХ ----------
 def init_db():
     conn = sqlite3.connect("teamfinder.db")
     c = conn.cursor()
@@ -40,10 +39,26 @@ def init_db():
 
 init_db()
 
-# ========== FASTAPI ==========
-app = FastAPI()
+# ---------- БОТ (aiogram 3) ----------
+bot = Bot(token=BOT_TOKEN)
+dp = Dispatcher()
 
-# HTML-шаблон веб-приложения (стеклянный стиль, полный CRUD)
+@dp.message(Command("start"))
+async def start_cmd(message: types.Message):
+    webapp_url = f"{BASE_URL}/webapp"
+    keyboard = ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="🔍 Открыть приложение", web_app=WebAppInfo(url=webapp_url))]],
+        resize_keyboard=True
+    )
+    await message.answer(
+        "🎮 *TeamFinder* — найди тиммейтов для Rust, CS, Dota!\n\n"
+        "Теперь можно *редактировать* и *удалять* свои объявления.\n"
+        "Нажми на кнопку ниже, чтобы открыть приложение.",
+        reply_markup=keyboard,
+        parse_mode="Markdown"
+    )
+
+# ---------- FASTAPI (тот же HTML, но без изменений) ----------
 HTML_PAGE = """
 <!DOCTYPE html>
 <html lang="ru">
@@ -338,10 +353,13 @@ HTML_PAGE = """
 </html>
 """
 
+app = FastAPI()
+
 @app.get("/webapp")
 async def get_webapp():
     return HTMLResponse(HTML_PAGE)
 
+# ---------- API ЭНДПОИНТЫ (без изменений) ----------
 @app.get("/api/posts")
 async def get_posts(game: str, category: str):
     conn = sqlite3.connect("teamfinder.db")
@@ -412,46 +430,26 @@ async def delete_post(post_id: int, request: Request):
     conn.close()
     return {"status": "deleted"}
 
-# ========== TELEGRAM БОТ (aiogram 2.x, webhook) ==========
-bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(bot)
-dp.middleware.setup(LoggingMiddleware())
-
-@dp.message_handler(commands=['start'])
-async def start_cmd(message: types.Message):
-    webapp_url = f"{BASE_URL}/webapp"
-    keyboard = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="🔍 Открыть приложение", web_app=WebAppInfo(url=webapp_url))]],
-        resize_keyboard=True
-    )
-    await message.answer(
-        "🎮 *TeamFinder* — найди тиммейтов для Rust, CS, Dota!\n\n"
-        "Теперь можно *редактировать* и *удалять* свои объявления.\n"
-        "Нажми на кнопку ниже, чтобы открыть приложение.",
-        reply_markup=keyboard,
-        parse_mode="Markdown"
-    )
-
-# Настройка webhook при старте приложения
+# ---------- НАСТРОЙКА WEBHOOK ----------
 @app.on_event("startup")
 async def on_startup():
     webhook_url = f"{BASE_URL}/webhook"
     await bot.set_webhook(webhook_url)
-    print(f"Webhook установлен: {webhook_url}")
+    print(f"Webhook set to {webhook_url}")
 
 @app.on_event("shutdown")
 async def on_shutdown():
     await bot.delete_webhook()
-    await bot.close()
-    print("Webhook удалён, бот остановлен")
+    await bot.session.close()
+    print("Webhook removed and bot session closed")
 
 @app.post("/webhook")
-async def webhook(request: Request):
+async def telegram_webhook(request: Request):
     update = types.Update(**await request.json())
-    await dp.process_update(update)
+    await dp.feed_update(bot, update)
     return {"ok": True}
 
-# ========== ЗАПУСК ==========
+# ---------- ЗАПУСК ----------
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
